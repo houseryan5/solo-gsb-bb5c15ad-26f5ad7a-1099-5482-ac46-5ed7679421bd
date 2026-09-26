@@ -115,6 +115,33 @@
     height:10px; width:14px; border:1.5px dashed #15803d;
     background:rgba(22,163,74,.12);
   }
+  .legend .layer i {
+    height:10px; width:10px; border-radius:50%;
+    border:2px solid #7c3aed; background:none;
+  }
+  select {
+    padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+    font-size:13px; background:#fff; max-width:100%;
+  }
+  ol.layers {
+    list-style:none; margin:8px 0 0; padding:0;
+    display:flex; flex-direction:column; gap:4px;
+    max-height:264px; overflow:auto;
+  }
+  ol.layers li {
+    border:1px solid var(--line); border-radius:6px; padding:4px 8px;
+    display:flex; align-items:center; gap:8px; background:#f8fafc;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12px;
+  }
+  ol.layers li:hover { border-color:#c4b5fd; background:#f5f3ff; }
+  ol.layers .idx {
+    width:20px; height:20px; border-radius:50%; background:#7c3aed;
+    color:#fff; font-size:11px; display:flex; align-items:center;
+    justify-content:center; flex:none;
+  }
+  ol.layers .txt { flex:1; }
+  #layerPanelBox { grid-column:1 / -1; }
   .status {
     margin-top:10px; border-radius:6px; padding:8px 10px; font-size:12.5px;
     border:1px solid transparent; display:none; white-space:pre-line;
@@ -135,7 +162,7 @@
 <body>
 <header>
   <h1>纸张对折打孔 · 展开预览</h1>
-  <p>设定纸张与折法 → 在最终折叠面上点击打孔（或开启「反查打孔」直接在展开图上点目标孔心，或在左侧「目标孔位排版」逐行录入目标孔心自动生成方案）→ 系统按折叠顺序逆推全部孔位（坐标单位 mm，原点在纸面左下角）。可划定原纸保护区，孔圆触碰保护区即禁止生成展开图；也可设定最小纸桥宽度（0 表示关闭），任意两孔圆边净距小于该值即冲突，冲突时不生成展开图、禁止下载。左侧「最大安全半径」可一键分析现有孔位可采用的最大统一打孔半径（0.001mm 刻度）并直接应用。合法展开结果可下载为 SVG，或打包为 A4 分页定位模板 ZIP（纵向 A4、1:1 实际毫米、四边留白 10mm、相邻页重叠 15mm，每页标注行列号、原纸窗口坐标与重叠区对位十字，按 100% 比例打印后拼接）。</p>
+  <p>设定纸张与折法 → 在最终折叠面上点击打孔（或开启「反查打孔」直接在展开图上点目标孔心，或在左侧「目标孔位排版」逐行录入目标孔心自动生成方案）→ 系统按折叠顺序逆推全部孔位（坐标单位 mm，原点在纸面左下角）。可划定原纸保护区，孔圆触碰保护区即禁止生成展开图；也可设定最小纸桥宽度（0 表示关闭），任意两孔圆边净距小于该值即冲突，冲突时不生成展开图、禁止下载。左侧「最大安全半径」可一键分析现有孔位可采用的最大统一打孔半径（0.001mm 刻度）并直接应用。合法展开结果可下载为 SVG，或打包为 A4 分页定位模板 ZIP（纵向 A4、1:1 实际毫米、四边留白 10mm、相邻页重叠 15mm，每页标注行列号、原纸窗口坐标与重叠区对位十字，按 100% 比例打印后拼接）。「叠层穿孔顺序」面板可列出每个打孔点自上而下穿透的每一层及该层在原纸上的孔心坐标。</p>
 </header>
 
 <div class="layout">
@@ -263,6 +290,7 @@
         <span class="hole"><i></i>孔</span>
         <span class="preview"><i></i>待确认反查孔位</span>
         <span class="zone"><i></i>保护区</span>
+        <span class="layer"><i></i>叠层穿孔顺序</span>
       </div>
       <div class="toolbar">
         <button type="button" id="btnDownload" class="primary" disabled>下载展开 SVG</button>
@@ -284,6 +312,22 @@
         <button type="button" id="btnCancelPlan">取消</button>
         <span class="hint" id="planInfo"></span>
       </div>
+    </section>
+
+    <section class="panel" id="layerPanelBox">
+      <h2>叠层穿孔顺序 <small id="layerPanelMeta"></small></h2>
+      <p class="hint">选定折叠面上的一个打孔点，按当前折法从折叠面顶部到底部
+        依次列出打孔穿透的每一层及该层在原纸上的孔心坐标（第 1 层在最上、
+        最先被穿透），并在展开图用紫色圈高亮对应孔。约定每一步移动半页都从
+        上方翻到静止半页上，移动侧原有层序随翻折反转。</p>
+      <div class="toolbar">
+        <label class="field" style="margin:0;flex:1">
+          <span>打孔点（折叠面现有打孔点）</span>
+          <select id="layerPointSel"></select>
+        </label>
+      </div>
+      <div class="status" id="layerStatus"></div>
+      <ol class="layers" id="layerList"></ol>
     </section>
   </div>
 </div>
@@ -328,6 +372,13 @@
   // 最大安全半径分析：结果依赖纸张/折法/孔位/保护区/纸桥宽度，任一变化即作废
   var radiusAnalysis = null;   // 最近一次分析结果（/api/max-radius 返回）
   var radiusSeq = 0;           // 分析请求序号；参数一变即作废旧响应
+
+  // 叠层穿孔顺序：选定打孔点 -> 服务端递推层序（顶->底），展开图高亮对应孔
+  var layerList = null;   // 当前层序（[{x,y}...]，顶->底）
+  var layerSeq = 0;       // 请求序号；参数一变即作废旧响应
+  var layerSel = 0;       // 选中的打孔点下标
+  var layerHover = -1;    // 悬停的层下标
+  var unfoldFatal = null; // /api/unfold 返回 400 或网络错误时的提示（lastResult 为旧值）
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -411,6 +462,7 @@
 
   // ---------------- 服务端计算 ----------------
   function schedule(immediate) {
+    invalidateLayerPanel();
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(refresh, immediate ? 0 : 120);
   }
@@ -428,15 +480,20 @@
       if (seq !== reqSeq) return;
       inflight = false;
       if (!r.data || r.data.ok !== true) {
-        setStatus("err", (r.data && r.data.error) || "服务器返回异常。");
+        unfoldFatal = (r.data && r.data.error) || "服务器返回异常。";
+        setStatus("err", unfoldFatal);
+        updateLayerPanel();
         return;
       }
+      unfoldFatal = null;
       applyResult(r.data);
       if (dirty) refresh();
     }).catch(function () {
       if (seq !== reqSeq) return;
       inflight = false;
-      setStatus("err", "网络错误：无法连接计算服务。");
+      unfoldFatal = "网络错误：无法连接计算服务。";
+      setStatus("err", unfoldFatal);
+      updateLayerPanel();
     });
   }
 
@@ -481,6 +538,7 @@
     }
     $("holeCountLabel").textContent = state.points.length + " / " + MAX_HOLES;
     updateDownloadBtn();
+    updateLayerPanel();
   }
 
   // 排版方案预览期间禁止下载（视图显示的是方案，不是当前打孔点）
@@ -519,6 +577,7 @@
     wrap.innerHTML = lastResult.unfoldedSvg;
     bindUnfoldedSvg();
     renderPendingOverlay();
+    renderLayerOverlay();
   }
 
   // ---------------- 折叠面点击 → 打孔坐标 ----------------
@@ -725,6 +784,7 @@
     updatePlanBar();
     renderFolded();
     renderUnfolded();
+    updateLayerPanel();       // 排版预览结束，恢复叠层穿孔顺序面板
   }
 
   function updatePlanBar() {
@@ -1031,6 +1091,7 @@
         updatePlanBar();
         renderFolded();
         renderUnfolded();
+        updateLayerPanel();    // 排版预览结束，恢复叠层穿孔顺序面板
         setStatus("err", (r.data && r.data.error) || "排版失败：服务器返回异常。");
         return;
       }
@@ -1038,6 +1099,7 @@
       updatePlanBar();
       renderFolded();
       renderUnfolded();
+      updateLayerPanel();      // 排版预览期间面板改为提示，不展示旧层序
       if (planPreview.feasible) {
         setStatus("ok", "方案可行：" + planPreview.pointCount + " 个打孔点 → " +
           planPreview.holeCount + " 个孔，连带孔集合与目标集合完全一致。" +
@@ -1105,6 +1167,173 @@
     clearPending();
     clearPlan();
     schedule(true);   // 应用后重新调用现有展开校验
+  });
+
+  // ---------------- 叠层穿孔顺序：选定打孔点 -> 服务端递推层序（顶->底） ----------------
+  // 参数一变即作废旧结果：清空层序列表，等待重新计算（不展示旧层序）
+  function invalidateLayerPanel() {
+    layerSeq++;
+    layerList = null;
+    layerHover = -1;
+    renderLayerList();
+    showLayerStatus("warn", "参数已变化，等待重新计算…");
+    $("layerPanelMeta").textContent = "";
+  }
+
+  function showLayerStatus(kind, msg) {
+    var el = $("layerStatus");
+    el.className = "status " + (kind ? kind + " show" : "");
+    el.textContent = msg || "";
+  }
+
+  // 主入口：applyResult / 选择打孔点 / 排版预览结束后调用。
+  // 无孔、当前展开校验失败或排版预览中时给出提示，不展示旧层序。
+  function updateLayerPanel() {
+    rebuildLayerPointOptions();
+    var hint = null, kind = "warn";
+    if (planPreview) {
+      hint = "排版预览中：当前显示的是方案视图，确认或取消后恢复叠层穿孔顺序。";
+    } else if (!state.points.length) {
+      hint = "没有打孔点：请先在折叠面打孔，再查看叠层穿孔顺序。";
+    } else if (unfoldFatal) {
+      hint = "当前展开校验失败：" + unfoldFatal; kind = "err";
+    } else if (lastResult && lastResult.error) {
+      hint = "当前展开校验失败：" + lastResult.error; kind = "err";
+    } else if (!lastResult) {
+      hint = "等待计算结果…";
+    }
+    if (hint) {
+      layerSeq++;          // 取消进行中的层序请求
+      layerList = null;
+      layerHover = -1;
+      showLayerStatus(kind, hint);
+      $("layerPanelMeta").textContent = "";
+      renderLayerList();
+      renderUnfolded();    // 去掉旧高亮
+      return;
+    }
+    showLayerStatus("", "");
+    if (layerSel >= state.points.length) layerSel = state.points.length - 1;
+    if (layerSel < 0) layerSel = 0;
+    fetchLayers();
+  }
+
+  // 下拉框选项随 state.points 刷新（保留选中下标，越界则夹紧）
+  function rebuildLayerPointOptions() {
+    var sel = $("layerPointSel");
+    sel.innerHTML = "";
+    var fw = lastResult && lastResult.folded ? lastResult.folded.width : 1;
+    var fh = lastResult && lastResult.folded ? lastResult.folded.height : 1;
+    state.points.forEach(function (p, i) {
+      var opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = "打孔点 #" + (i + 1) + "（折叠面 " +
+        (p.x * fw).toFixed(2) + ", " + (p.y * fh).toFixed(2) + " mm）";
+      sel.appendChild(opt);
+    });
+    if (layerSel >= state.points.length) layerSel = state.points.length - 1;
+    if (layerSel < 0) layerSel = 0;
+    sel.value = String(layerSel);
+    sel.disabled = !state.points.length;
+  }
+
+  function fetchLayers() {
+    var p = state.points[layerSel];
+    if (!p) return;
+    var seq = ++layerSeq;
+    fetch("/api/layers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ width: state.width, height: state.height,
+                             folds: state.folds, point: p })
+    }).then(function (resp) {
+      return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+    }).then(function (r) {
+      if (seq !== layerSeq) return;   // 参数已变或已有更新的请求，丢弃
+      if (!r.data || r.data.ok !== true) {
+        layerList = null;
+        showLayerStatus("err", (r.data && r.data.error) || "计算失败：服务器返回异常。");
+        renderLayerList();
+        return;
+      }
+      layerList = r.data.layers;
+      showLayerStatus("", "");
+      $("layerPanelMeta").textContent = "共 " + r.data.count + " 层（顶 → 底）";
+      renderLayerList();
+      renderUnfolded();
+    }).catch(function () {
+      if (seq !== layerSeq) return;
+      layerList = null;
+      showLayerStatus("err", "网络错误：无法连接计算服务。");
+      renderLayerList();
+    });
+  }
+
+  function renderLayerList() {
+    var ol = $("layerList");
+    ol.innerHTML = "";
+    if (!layerList) return;
+    layerList.forEach(function (hp, i) {
+      var li = document.createElement("li");
+      var idx = document.createElement("span");
+      idx.className = "idx"; idx.textContent = String(i + 1);
+      var txt = document.createElement("span");
+      txt.className = "txt";
+      txt.textContent = "→ 原纸 (" + hp.x + ", " + hp.y + ") mm" +
+        (i === 0 ? "（最上层，先被穿透）" :
+         i === layerList.length - 1 && layerList.length > 1 ? "（最下层）" : "");
+      li.addEventListener("mouseenter", function () { setLayerHover(i); });
+      li.appendChild(idx); li.appendChild(txt);
+      ol.appendChild(li);
+    });
+  }
+
+  // 悬停某一层：展开图上单独强调该层对应的孔（列表行高亮由 CSS :hover 负责）
+  function setLayerHover(i) {
+    if (layerHover === i) return;
+    layerHover = i;
+    renderUnfolded();
+  }
+
+  // 展开图上用紫色圈高亮各层对应孔，层数少时标注层号
+  function renderLayerOverlay() {
+    if (!layerList || !layerList.length || planPreview) return;
+    var svg = $("unfoldedSvgWrap").querySelector("svg");
+    if (!svg) return;
+    var H = svg.viewBox.baseVal.height;
+    var g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("id", "layerPreview");
+    var showText = layerList.length <= 32;
+    layerList.forEach(function (hp, i) {
+      var hot = i === layerHover;
+      var c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", hp.x);
+      c.setAttribute("cy", H - hp.y);
+      c.setAttribute("r", state.radius + (hot ? 2.2 : 1.2));
+      c.setAttribute("fill", "none");
+      c.setAttribute("stroke", "#7c3aed");
+      c.setAttribute("stroke-width", hot ? "1.1" : "0.5");
+      g.appendChild(c);
+      if (showText) {
+        var t = document.createElementNS(SVG_NS, "text");
+        t.setAttribute("x", hp.x + state.radius + 2.0);
+        t.setAttribute("y", H - hp.y - state.radius - 1.0);
+        t.setAttribute("font-size", "3");
+        t.setAttribute("fill", "#6d28d9");
+        t.textContent = String(i + 1);
+        g.appendChild(t);
+      }
+    });
+    svg.appendChild(g);
+  }
+
+  $("layerPointSel").addEventListener("change", function () {
+    layerSel = +this.value || 0;
+    layerHover = -1;
+    updateLayerPanel();
+  });
+  $("layerList").addEventListener("mouseleave", function () {
+    setLayerHover(-1);
   });
 
   $("btnDownload").addEventListener("click", function () {

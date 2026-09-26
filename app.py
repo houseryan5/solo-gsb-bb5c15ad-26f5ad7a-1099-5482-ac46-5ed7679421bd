@@ -16,6 +16,10 @@
   中线镜像），逐层折回最终折叠面，得到归一化孔心；再用同一展开算法列出
   这一次打孔必然生成的全部孔位。目标孔心距纸张边界/折痕不大于打孔半径时
   拒绝并说明具体原因。
+- 叠层穿孔顺序：选定折叠面上的一个打孔点，按当前折法正向递推最终折叠面
+  在该点处自上而下的层叠顺序（约定每一步移动半页都从上方翻到静止半页上，
+  移动侧原有层序随翻折反转），给出打孔依次穿透的每一层及该层在原纸上的
+  孔心坐标；多次折叠时层序与镜像坐标同步递推，不按展开孔坐标排序。
 - 目标孔位排版：把原纸上的一批目标孔心分别折回最终折叠面（多目标可折到
   同一打孔点），再展开为完整连带孔组并按坐标容差去重。只有连带孔集合与
   目标集合完全一致、方案打孔点数不超过 MAX_HOLES 且通过边界/折痕/保护区
@@ -171,6 +175,48 @@ def fold_point_to_face(tx, ty, folds, width, height):
             y = line - abs(y - line) if f == "hT" else abs(y - line)
             ch = line
     return x, y
+
+
+def layer_stack(folds, width, height):
+    """正向递推最终折叠面的层叠顺序（顶 -> 底）。
+
+    每层用 (sx, tx, sy, ty) 表示仿射映射：原纸坐标 = (sx*x + tx, sy*y + ty)，
+    其中 (x, y) 为最终折叠面局部 mm 坐标，sx/sy ∈ {+1, -1}。
+    约定每一步移动半页都从上方翻到静止半页上：移动侧整叠层序随翻折反转
+    （翻转使上下颠倒），并落在静止半页层叠之上。与 unfold_points 互为
+    正逆：同一打孔点经二者得到的原纸孔位集合相同，只是顺序不同——
+    本函数给出物理穿透顺序，unfold_points 给出展开枚举顺序。
+    """
+    layers = [(1.0, 0.0, 1.0, 0.0)]
+    w, h = float(width), float(height)
+    for f in folds:
+        if f == "vR":
+            # 右半折向左：静止半不变；移动半关于 x=w/2 镜像（x_old = w - x_new）
+            moving = [(-sx, sx * w + tx, sy, ty) for sx, tx, sy, ty in layers]
+            layers = moving[::-1] + layers
+            w /= 2.0
+        elif f == "vL":
+            # 左半折向右：静止半随新面原点平移（x_old = x_new + w/2）；
+            # 移动半镜像（x_old = w/2 - x_new）
+            c = w / 2.0
+            stationary = [(sx, sx * c + tx, sy, ty) for sx, tx, sy, ty in layers]
+            moving = [(-sx, sx * c + tx, sy, ty) for sx, tx, sy, ty in layers]
+            layers = moving[::-1] + stationary
+            w = c
+        elif f == "hT":
+            # 上半折向下：静止半不变；移动半关于 y=h/2 镜像（y_old = h - y_new）
+            moving = [(sx, tx, -sy, sy * h + ty) for sx, tx, sy, ty in layers]
+            layers = moving[::-1] + layers
+            h /= 2.0
+        else:  # hB
+            # 下半折向上：静止半随新面原点平移（y_old = y_new + h/2）；
+            # 移动半镜像（y_old = h/2 - y_new）
+            c = h / 2.0
+            stationary = [(sx, tx, sy, sy * c + ty) for sx, tx, sy, ty in layers]
+            moving = [(sx, tx, -sy, sy * c + ty) for sx, tx, sy, ty in layers]
+            layers = moving[::-1] + stationary
+            h = c
+    return layers
 
 
 def dedupe_points(points, tol=1e-5):
@@ -1024,6 +1070,33 @@ def reverse_lookup(payload):
     }
 
 
+def layer_order(payload):
+    """叠层穿孔顺序：折叠面一个打孔点 -> 自上而下各层在原纸上的孔心坐标。
+
+    复用现有纸张/折法校验；打孔点为折叠面归一化坐标（现有打孔点之一，
+    其边界/折痕/保护区/纸桥校验由 /api/unfold 的页面状态负责，本接口只
+    计算几何层序）。返回 layers 列表（顶 -> 底，即打孔穿透顺序）。
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    width = _num(payload, "width", MIN_DIM, MAX_DIM, "纸张宽度")
+    height = _num(payload, "height", MIN_DIM, MAX_DIM, "纸张高度")
+    folds = _validate_folds(payload)
+    point = payload.get("point")
+    if not isinstance(point, dict):
+        raise ValueError("缺少打孔点 point（折叠面归一化坐标）")
+    nx = _num(point, "x", 0.0, 1.0, "打孔点 x")
+    ny = _num(point, "y", 0.0, 1.0, "打孔点 y")
+    w, h, _edges, _nv, _nh = folded_state(width, height, folds)
+    px, py = nx * w, ny * h
+    layers = [{"x": round(sx * px + tx, 6), "y": round(sy * py + ty, 6)}
+              for sx, tx, sy, ty in layer_stack(folds, width, height)]
+    return {"ok": True,
+            "point": {"x": round(px, 6), "y": round(py, 6)},
+            "foldedWidth": round(w, 6), "foldedHeight": round(h, 6),
+            "count": len(layers), "layers": layers}
+
+
 def plan_layout(payload):
     """目标孔位排版：原纸目标孔心集合 -> 折叠面打孔方案。
 
@@ -1475,6 +1548,18 @@ def api_reverse():
         return _bad("请求不是合法 JSON")
     try:
         return jsonify(reverse_lookup(payload))
+    except ValueError as exc:
+        return _bad(str(exc))
+
+
+@app.route("/api/layers", methods=["POST"])
+def api_layers():
+    """叠层穿孔顺序：入参 {width, height, folds, point:{x,y}（折叠面归一化）}。"""
+    payload = request.get_json(force=True, silent=True)
+    if payload is None:
+        return _bad("请求不是合法 JSON")
+    try:
+        return jsonify(layer_order(payload))
     except ValueError as exc:
         return _bad(str(exc))
 
