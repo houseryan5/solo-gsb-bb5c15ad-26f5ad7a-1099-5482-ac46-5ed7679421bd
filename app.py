@@ -38,6 +38,12 @@
   最小圆心距给出的间距上界，以及打孔器容量上限；刻度化结果用现有展开
   校验复核，保证可实际通过，并给出决定该值的孔位与限制原因。无孔、
   保护区越界或不存在可用半径时返回明确提示。
+- 叠层穿孔顺序：选中折叠面上的某个现有打孔点，按当前折法逐层递推最终
+  折叠面中从上到下的每一层：每一步移动半页都从上方翻到静止半页上，移动
+  侧原有层序随翻折整体反转（移动侧层栈先倒序再压到静止侧栈顶），并对该侧
+  各层的原纸仿射映射叠加一次关于当前中线的镜像。最终按从上到下输出各层及
+  其孔心在原纸上的坐标（多重折叠为递推结果，不是按展开孔坐标排序）。
+  结果孔位集合与 unfold_points 一致；无孔或当前展开校验失败时拒绝查询。
 - A4 分页定位模板：把合法展开结果按实际毫米 1:1 排到纵向 A4 页
   （210×297mm，四边留白 10mm，可打印区 190×277mm，相邻页重叠 15mm），
   按原纸尺寸计算覆盖全纸的分页窗口（窗口从原纸左下角起排，列自左而右、
@@ -646,6 +652,54 @@ def build_a4_zip(width, height, holes, creases, zones, radius):
         zf.writestr("README.txt", a4_readme_text(
             width, height, radius, len(holes), layout))
     return buf.getvalue(), layout
+
+
+# ---------------------------------------------------------------------------
+# 叠层穿孔顺序（从上到下穿过的各层及其原纸孔心）
+# ---------------------------------------------------------------------------
+def pierce_layer_points(fx, fy, folds, width, height):
+    """逐层递推最终折叠面的层栈，返回从上到下各层在原纸上的孔心坐标。
+
+    约定与每折的实际动作一致：移动半页从上方翻到静止半页上，因此新层栈为
+    「移动侧层栈倒序 + 静止侧层栈」——移动侧原有层序随翻折整体反转。
+    每层携带 (sx, bx, sy, by)，把当前折叠面局部坐标 (u, v) 映到原纸：
+    x = sx*u + bx，y = sy*v + by（sx/sy ∈ {+1,-1}）。每折时静止侧各层
+    映射不变（vL/hB 的静止侧平移到当前面坐标系），翻折侧在静止侧的基础上
+    再叠加一次关于当前面中线的镜像（系数变号、常数项相应改变）。多折时
+    层序与镜像都逐层递推，不能只按最终展开孔坐标排序。
+    """
+    layers = [(1.0, 0.0, 1.0, 0.0)]   # 初始：原纸一层，恒等映射
+    cw, ch = float(width), float(height)
+    for f in folds:
+        moved, still = [], []
+        if f in ("vL", "vR"):
+            pre_w, half = cw, cw / 2.0
+            for sx, bx, sy, by in layers:
+                if f == "vR":
+                    # 右半（x∈[half,pre_w]）关于 x=half 翻到左半
+                    still.append((sx, bx, sy, by))
+                    moved.append((-sx, bx + sx * pre_w, sy, by))
+                else:
+                    # 左半（x∈[0,half]）关于 x=half 翻到右半
+                    still.append((sx, bx + sx * half, sy, by))
+                    moved.append((-sx, bx + sx * half, sy, by))
+            cw = half
+        else:
+            pre_h, half = ch, ch / 2.0
+            for sx, bx, sy, by in layers:
+                if f == "hT":
+                    # 上半（y∈[half,pre_h]）关于 y=half 翻到下半
+                    still.append((sx, bx, sy, by))
+                    moved.append((sx, bx, -sy, by + sy * pre_h))
+                else:
+                    # 下半（y∈[0,half]）关于 y=half 翻到上半
+                    still.append((sx, bx, sy, by + sy * half))
+                    moved.append((sx, bx, -sy, by + sy * half))
+            ch = half
+        # 移动半页从上方落下：其层序随翻折反转后压在静止半页之上
+        layers = moved[::-1] + still
+    return [{"x": round(sx * fx + bx, 6), "y": round(sy * fy + by, 6)}
+            for sx, bx, sy, by in layers]
 
 
 # ---------------------------------------------------------------------------
@@ -1465,6 +1519,46 @@ def api_unfold():
         return jsonify(compute(payload))
     except ValueError as exc:
         return _bad(str(exc))
+
+
+@app.route("/api/pierce-order", methods=["POST"])
+def api_pierce_order():
+    """叠层穿孔顺序：入参与 /api/unfold 相同，另加 pointIndex（选中的现有
+    折叠面打孔点下标，按 points 顺序）。
+
+    先完整复用 compute（/api/unfold）的校验：参数非法返回 400；无打孔点、
+    下标越界，或当前展开校验失败（孔压边界/折痕、保护区越界/触碰、纸桥
+    净距不足等）时返回 400 与具体中文原因，不给出任何旧层序结果。
+    合法时返回从上到下逐层的原纸孔心 layers（共 2^折数 个，可能重合）。
+    """
+    payload = request.get_json(force=True, silent=True)
+    if payload is None:
+        return _bad("请求不是合法 JSON")
+    try:
+        result = compute(payload)
+    except ValueError as exc:
+        return _bad(str(exc))
+    if result["error"] or not result["unfoldedSvg"]:
+        return _bad(result["error"] or "当前展开校验未通过，无法查询叠层穿孔顺序。")
+
+    # 校验通过后重新解析入参（compute 已验证过格式与范围），定位选中打孔点
+    width, height, radius, folds, _min_bridge = _validate_sheet(payload)
+    norm_pts = _validate_norm_points(payload)
+    if not norm_pts:
+        return _bad("当前没有打孔点：请先在折叠面上打孔，再选择打孔点查看穿孔顺序。")
+    idx = payload.get("pointIndex")
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        return _bad("pointIndex 必须是打孔点下标（整数）。")
+    if not 0 <= idx < len(norm_pts):
+        return _bad(f"选中的打孔点下标 {idx} 不存在（当前共 {len(norm_pts)} 个打孔点）。")
+
+    w, h, _edges, _nv, _nh = folded_state(width, height, folds)
+    fx, fy = norm_pts[idx]["x"] * w, norm_pts[idx]["y"] * h
+    layers = pierce_layer_points(fx, fy, folds, width, height)
+    return jsonify({"ok": True, "pointIndex": idx,
+                    "pointMm": {"x": round(fx, 6), "y": round(fy, 6)},
+                    "foldCount": len(folds), "layerCount": len(layers),
+                    "layers": layers})
 
 
 @app.route("/api/reverse", methods=["POST"])
